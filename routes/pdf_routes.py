@@ -121,6 +121,37 @@ async def get_knowledge_graph(document_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error retrieving knowledge graph: {str(e)}")
 
+@router.get("/documents")
+async def get_all_documents():
+    """
+    Get all document IDs stored in the database.
+    
+    Returns:
+        JSONResponse with a list of all document IDs
+        
+    Raises:
+        HTTPException: If there's an error retrieving the document IDs
+    """
+    try:
+        # Initialize Neo4j service
+        from services.neo4j_service import Neo4jService
+        
+        # Initialize Neo4j service
+        neo4j_service = Neo4jService()
+        
+        # Get all document IDs
+        document_ids = neo4j_service.get_all_document_ids()
+        neo4j_service.close()
+        
+        return JSONResponse(content={
+            "status": "success",
+            "document_ids": document_ids,
+            "count": len(document_ids)
+        })
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving document IDs: {str(e)}")
+
 @router.get("/search/{document_id}")
 async def similarity_search(
     document_id: str, 

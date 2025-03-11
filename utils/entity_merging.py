@@ -9,6 +9,14 @@ from difflib import SequenceMatcher
 from objects.knowledge_graph import KnowledgeGraph, Node, Relationship
 from utils.llm import get_llm
 from langchain_core.prompts import ChatPromptTemplate
+from utils.constants import (
+    GPT_4O_MODEL,
+    ENTITY_SIMILARITY_THRESHOLD,
+    ENTITY_STOP_WORDS,
+    MIN_WORD_LENGTH_FOR_PREFIX_CHECK,
+    ENTITY_MERGING_SYSTEM_PROMPT,
+    ENTITY_MERGING_USER_TEMPLATE
+)
 
 def normalize_entity_name(name: str) -> str:
     """
@@ -55,9 +63,8 @@ def are_names_semantically_similar(name1: str, name2: str) -> bool:
         return True
     
     # Split into words and remove common stop words
-    stop_words = {'a', 'an', 'the', 'and', 'or', 'but', 'of', 'for', 'with', 'in', 'on', 'at', 'to', 'from'}
-    words1 = [w for w in norm1.split() if w not in stop_words]
-    words2 = [w for w in norm2.split() if w not in stop_words]
+    words1 = [w for w in norm1.split() if w not in ENTITY_STOP_WORDS]
+    words2 = [w for w in norm2.split() if w not in ENTITY_STOP_WORDS]
     
     # If either set is empty after removing stop words, return False
     if not words1 or not words2:
@@ -74,14 +81,14 @@ def are_names_semantically_similar(name1: str, name2: str) -> bool:
     for w1 in words1:
         for w2 in words2:
             # If one word is at least 4 chars and is a prefix of the other
-            if len(w1) >= 4 and w2.startswith(w1):
+            if len(w1) >= MIN_WORD_LENGTH_FOR_PREFIX_CHECK and w2.startswith(w1):
                 return True
-            if len(w2) >= 4 and w1.startswith(w2):
+            if len(w2) >= MIN_WORD_LENGTH_FOR_PREFIX_CHECK and w1.startswith(w2):
                 return True
     
     return False
 
-def find_similar_entity_groups(knowledge_graph: KnowledgeGraph, similarity_threshold: float = 0.85) -> List[List[int]]:
+def find_similar_entity_groups(knowledge_graph: KnowledgeGraph, similarity_threshold: float = ENTITY_SIMILARITY_THRESHOLD) -> List[List[int]]:
     """
     Find groups of similar entities in a knowledge graph based on name similarity.
     
@@ -166,54 +173,6 @@ async def llm_decide_entity_merges(knowledge_graph: KnowledgeGraph, potential_gr
     if not potential_groups:
         return []
     
-    # Prepare the system prompt
-    system_prompt = """You are an expert in knowledge graph entity resolution. Your task is to analyze groups of similar entities and decide:
-1. Whether they should be merged into a single entity
-2. What the final entity ID (name) should be
-3. What the final entity description should be
-
-For each group, consider:
-- Semantic similarity of the entities
-- Whether they refer to the same real-world concept
-- Which name is most canonical, clear, and descriptive
-- Which description is most comprehensive and accurate
-
-Be more aggressive in merging entities that likely refer to the same concept, even if their names differ somewhat.
-For example, "personal portfolio website" and "personal website" should be merged as they refer to the same concept.
-
-Return your decisions in a structured format. For each group, decide if they should be merged and provide the final entity details.
-"""
-
-    # Prepare the user prompt template
-    user_template = """I have identified the following groups of potentially similar entities in a knowledge graph:
-
-{entity_groups}
-
-For each group, please decide:
-1. Should these entities be merged? (true/false)
-2. If yes, what should be the final entity ID (name)?
-3. If yes, what should be the final entity description?
-
-Be more aggressive in merging entities that likely refer to the same concept, even if their names differ somewhat.
-For example, "personal portfolio website" and "personal website" should be merged as they refer to the same concept.
-
-Return your analysis in the following JSON format:
-```json
-[
-  {
-    "group_id": 0,
-    "should_merge": true/false,
-    "final_id": "chosen entity name",
-    "final_description": "chosen entity description",
-    "indices": [list of indices to merge]
-  },
-  ...
-]
-```
-
-Only include groups where should_merge is true in your response.
-"""
-
     # Format the entity groups for the prompt
     entity_groups_text = ""
     for i, group in enumerate(potential_groups):
@@ -224,10 +183,10 @@ Only include groups where should_merge is true in your response.
         entity_groups_text += "\n"
 
     # Create the LLM chain
-    llm = get_llm("gpt-4o")
+    llm = get_llm(GPT_4O_MODEL)
     prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", user_template)
+        ("system", ENTITY_MERGING_SYSTEM_PROMPT),
+        ("human", ENTITY_MERGING_USER_TEMPLATE)
     ])
     
     chain = prompt | llm
@@ -264,7 +223,7 @@ Only include groups where should_merge is true in your response.
         logging.error(f"Error in LLM entity merge decision: {str(e)}")
         return []
 
-async def merge_similar_entities(knowledge_graph: KnowledgeGraph, similarity_threshold: float = 0.85) -> KnowledgeGraph:
+async def merge_similar_entities(knowledge_graph: KnowledgeGraph, similarity_threshold: float = ENTITY_SIMILARITY_THRESHOLD) -> KnowledgeGraph:
     """
     Merge similar entities in a knowledge graph using LLM decisions.
     

@@ -5,8 +5,9 @@ import logging
 import asyncio
 from typing import List, Dict, Any, Optional
 import tiktoken
+from utils.constants import GPT_4O_MINI, DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP, DEFAULT_MAX_CONCURRENCY
 
-def count_tokens(text: str, model: str = "gpt-4o-mini") -> int:
+def count_tokens(text: str, model: str = GPT_4O_MINI) -> int:
     """
     Count the number of tokens in a text string.
     
@@ -25,7 +26,7 @@ def count_tokens(text: str, model: str = "gpt-4o-mini") -> int:
         # Fallback: estimate tokens as words / 0.75 (rough approximation)
         return int(len(text.split()) / 0.75)
 
-def chunk_text(text: str, chunk_size: int = 250, overlap: int = 50, model: str = "gpt-4o-mini") -> List[str]:
+def chunk_text(text: str, chunk_size: int = DEFAULT_CHUNK_SIZE, overlap: int = DEFAULT_CHUNK_OVERLAP, model: str = GPT_4O_MINI) -> List[str]:
     """
     Split text into chunks of approximately chunk_size tokens with overlap.
     
@@ -92,7 +93,7 @@ def chunk_text(text: str, chunk_size: int = 250, overlap: int = 50, model: str =
             
         return chunks
 
-async def process_chunks_concurrently(chunks: List[str], processor_func, max_concurrency: int = 5) -> List[Any]:
+async def process_chunks_concurrently(chunks: List[str], processor_func, max_concurrency: int = DEFAULT_MAX_CONCURRENCY) -> List[Any]:
     """
     Process text chunks concurrently using the provided processor function.
     

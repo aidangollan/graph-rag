@@ -342,3 +342,270 @@ class Neo4jService:
         )
         result = tx.run(query, document_id=document_id)
         return [{"source": record["source"], "target": record["target"], "type": record["type"]} for record in result]
+
+    def get_connected_chunks(self, document_id: str, node_ids: List[str]) -> List[Dict[str, Any]]:
+        """
+        Get chunks connected to the given nodes.
+        
+        Args:
+            document_id: The document ID to search within
+            node_ids: List of node IDs to find connected chunks for
+            
+        Returns:
+            List of connected chunks
+        """
+        try:
+            if not node_ids:
+                return []
+            
+            with self.driver.session() as session:
+                # Query to get chunks that contain the specified concepts
+                # Note: The relationship direction is from chunk to concept (CHUNK)-[:CONTAINS]->(CONCEPT)
+                query = """
+                MATCH (d:Document {id: $document_id})
+                MATCH (c:Concept)-[:BELONGS_TO]->(d)
+                WHERE c.id IN $node_ids
+                MATCH (chunk:Chunk)-[:CONTAINS]->(c)
+                RETURN DISTINCT chunk.id AS id, chunk.content AS content
+                """
+                
+                result = session.run(
+                    query,
+                    document_id=document_id,
+                    node_ids=node_ids
+                )
+                
+                # Process results
+                chunks = []
+                for record in result:
+                    if record["id"] and record["content"]:
+                        chunks.append({
+                            "id": record["id"],
+                            "content": record["content"]
+                        })
+                
+                # If no chunks were found, use the node descriptions as context
+                if not chunks:
+                    logging.info("No chunks found, using node descriptions as context")
+                    
+                    # Get node descriptions
+                    node_query = """
+                    MATCH (d:Document {id: $document_id})
+                    MATCH (c:Concept)-[:BELONGS_TO]->(d)
+                    WHERE c.id IN $node_ids
+                    RETURN c.id AS id, c.description AS description
+                    """
+                    
+                    node_result = session.run(
+                        node_query,
+                        document_id=document_id,
+                        node_ids=node_ids
+                    )
+                    
+                    for record in node_result:
+                        chunks.append({
+                            "id": record["id"] + "_context",
+                            "content": record["description"]
+                        })
+                
+                return chunks
+        except Exception as e:
+            logging.error(f"Error getting connected chunks: {str(e)}")
+            return []
+
+    def get_all_document_ids(self) -> List[str]:
+        """
+        Get all document IDs stored in the Neo4j database.
+        
+        Returns:
+            List of document IDs
+        """
+        try:
+            with self.driver.session() as session:
+                # Query to get all document IDs
+                query = """
+                MATCH (d:Document)
+                RETURN d.id AS document_id
+                ORDER BY d.id
+                """
+                
+                result = session.run(query)
+                
+                # Process results
+                document_ids = [record["document_id"] for record in result]
+                
+                return document_ids
+        except Exception as e:
+            logging.error(f"Error getting all document IDs: {str(e)}")
+            return []
+
+    @staticmethod
+    def _create_chunk_node(tx, chunk_id: str, chunk_content: str, embedding_score, document_id: str) -> None:
+        """
+        Create a chunk node in Neo4j.
+        
+        Args:
+            tx: Neo4j transaction
+            chunk_id: Unique identifier for the chunk
+            chunk_content: Text content of the chunk
+            embedding_score: Embedding vector for the chunk
+            document_id: Document ID to link the chunk to
+        """
+        # Convert embedding_score to a string if it's a list or array
+        if isinstance(embedding_score, (list, np.ndarray)):
+            # Convert numpy array to list if needed
+            if hasattr(embedding_score, 'tolist'):
+                embedding_score = embedding_score.tolist()
+                
+            # Serialize the embedding vector to a string for storage
+            embedding_score = str(embedding_score)
+        
+        # Create the chunk node
+        query = """
+        MERGE (chunk:Chunk {id: $chunk_id})
+        SET chunk.content = $content,
+            chunk.embedding_score = $embedding_score
+        WITH chunk
+        
+        MATCH (d:Document {id: $document_id})
+        MERGE (chunk)-[:BELONGS_TO]->(d)
+        """
+        
+        tx.run(
+            query,
+            chunk_id=chunk_id,
+            content=chunk_content,
+            embedding_score=embedding_score,
+            document_id=document_id
+        )
+    
+    @staticmethod
+    def _create_chunk_concept_relationship(tx, chunk_id: str, concept_id: str):
+        """
+        Create a relationship between a chunk and a concept node in Neo4j.
+        
+        Args:
+            tx: Neo4j transaction
+            chunk_id: ID of the chunk node
+            concept_id: ID of the concept node
+        """
+        query = """
+        MATCH (chunk:Chunk {id: $chunk_id})
+        MATCH (concept:Concept {id: $concept_id})
+        MERGE (chunk)-[:CONTAINS]->(concept)
+        """
+        
+        tx.run(
+            query,
+            chunk_id=chunk_id,
+            concept_id=concept_id
+        )
+    
+    def commit_knowledge_graph_with_chunks(self, knowledge_graph, document_id: str, chunks: List[str]) -> Dict[str, Any]:
+        """
+        Commit a knowledge graph with its chunks to the Neo4j database.
+        
+        Args:
+            knowledge_graph: The knowledge graph to commit
+            document_id: Unique identifier for the document
+            chunks: List of text chunks from the document
+            
+        Returns:
+            Dictionary with the result of the operation
+        """
+        try:
+            with self.driver.session() as session:
+                # Create document node
+                session.execute_write(self._create_document_node, document_id)
+                
+                # Generate embeddings for chunks
+                from utils.embeddings import generate_embedding
+                import asyncio
+                
+                # Generate embeddings for each chunk
+                chunk_embeddings = []
+                for chunk in chunks:
+                    embedding = generate_embedding(chunk)
+                    chunk_embeddings.append(embedding)
+                
+                # Create chunk nodes
+                chunk_ids = []
+                for i, (chunk, embedding) in enumerate(zip(chunks, chunk_embeddings)):
+                    chunk_id = f"{document_id}_chunk_{i}"
+                    chunk_ids.append(chunk_id)
+                    session.execute_write(
+                        self._create_chunk_node, 
+                        chunk_id, 
+                        chunk, 
+                        embedding, 
+                        document_id
+                    )
+                
+                # Track successful operations
+                successful_nodes = []
+                successful_relationships = 0
+                chunk_concept_relationships = 0
+                
+                # Create concept nodes
+                for node in knowledge_graph.nodes:
+                    try:
+                        session.execute_write(self._create_concept_node, node, document_id)
+                        successful_nodes.append(node.id)
+                    except Exception as e:
+                        logging.error(f"Error creating node {node.id}: {str(e)}")
+                
+                # Create relationships between concepts
+                for relationship in knowledge_graph.relationships:
+                    try:
+                        session.execute_write(
+                            self._create_relationship, 
+                            relationship, 
+                            document_id
+                        )
+                        successful_relationships += 1
+                    except Exception as e:
+                        logging.error(f"Error creating relationship {relationship.source} -{relationship.type}-> {relationship.target}: {str(e)}")
+                
+                # Create relationships between chunks and concepts
+                # For each chunk, find which concepts are mentioned in it
+                for i, chunk in enumerate(chunks):
+                    chunk_id = chunk_ids[i]
+                    chunk_lower = chunk.lower()
+                    
+                    for node in knowledge_graph.nodes:
+                        # Check if the node description is in the chunk
+                        # This is a simple heuristic - we could use more sophisticated methods
+                        if node.description.lower() in chunk_lower:
+                            try:
+                                # Create a relationship from the chunk to the concept
+                                session.execute_write(
+                                    self._create_chunk_concept_relationship,
+                                    chunk_id,
+                                    node.id
+                                )
+                                chunk_concept_relationships += 1
+                            except Exception as e:
+                                logging.error(f"Error creating chunk-concept relationship {chunk_id} -CONTAINS-> {node.id}: {str(e)}")
+                
+                # Get statistics
+                node_count = len(successful_nodes)
+                relationship_count = successful_relationships
+                
+                # Log success
+                logging.info(f"Successfully committed knowledge graph with chunks to Neo4j: {node_count} nodes, {len(chunk_ids)} chunks, {relationship_count} concept relationships, {chunk_concept_relationships} chunk-concept relationships")
+                
+                return {
+                    "document_id": document_id,
+                    "nodes_committed": node_count,
+                    "chunks_committed": len(chunk_ids),
+                    "relationships_committed": relationship_count,
+                    "chunk_concept_relationships": chunk_concept_relationships,
+                    "status": "success"
+                }
+        except Exception as e:
+            logging.error(f"Error committing knowledge graph with chunks to Neo4j: {str(e)}")
+            return {
+                "document_id": document_id,
+                "status": "error",
+                "error": str(e)
+            }

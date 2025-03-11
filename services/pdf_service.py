@@ -8,7 +8,15 @@ from typing import Tuple, Dict, Any, List
 from services.kg_service import CustomKGBuilder
 from services.neo4j_service import Neo4jService
 from utils.llm import get_llm
-from utils.constants import GPT_4O_MINI
+from utils.constants import (
+    GPT_4O_MINI, 
+    DEFAULT_CHUNK_SIZE, 
+    DEFAULT_CHUNK_OVERLAP, 
+    DEFAULT_MAX_CONCURRENCY,
+    DEFAULT_TEXT_PREVIEW_LENGTH,
+    DEFAULT_SUMMARY_SYSTEM_PROMPT,
+    DEFAULT_SUMMARY_USER_TEMPLATE
+)
 from utils.text_chunking import chunk_text, process_chunks_concurrently
 from langchain_core.prompts import ChatPromptTemplate
 from objects.knowledge_graph import KnowledgeGraph, Node, Relationship
@@ -62,24 +70,11 @@ class PDFService:
         try:
             logging.info("Generating summary of PDF text")
             
-            # Create a prompt for summarization
-            system_prompt = """
-            You are a professional summarizer. Your task is to create a concise and comprehensive summary 
-            of the provided text. Focus on capturing the main ideas, key concepts, and important details.
-            The summary should be approximately 15% of the original text length, but no more than 1000 words.
-            """
-            
-            user_template = """
-            Please summarize the following text:
-            
-            {text}
-            """
-            
             # Get LLM
             summary_llm = get_llm(GPT_4O_MINI)
             summary_prompt = ChatPromptTemplate.from_messages([
-                ("system", system_prompt),
-                ("human", user_template),
+                ("system", DEFAULT_SUMMARY_SYSTEM_PROMPT),
+                ("human", DEFAULT_SUMMARY_USER_TEMPLATE),
             ])
             
             # Generate summary
@@ -90,14 +85,15 @@ class PDFService:
         except Exception as e:
             logging.error(f"Error generating summary: {str(e)}")
             # Return a short excerpt of the text if summarization fails
-            return text[:500] + "..." if len(text) > 500 else text
+            return text[:DEFAULT_TEXT_PREVIEW_LENGTH] + "..." if len(text) > DEFAULT_TEXT_PREVIEW_LENGTH else text
     
     @staticmethod
-    async def process_chunk(chunk: str, kg_builder: CustomKGBuilder) -> KnowledgeGraph:
+    async def process_chunk(chunk_index: int, chunk: str, kg_builder: CustomKGBuilder) -> KnowledgeGraph:
         """
         Process a single text chunk to generate a knowledge graph.
         
         Args:
+            chunk_index: Index of the chunk
             chunk: Text chunk to process
             kg_builder: Knowledge graph builder instance
             
@@ -105,7 +101,7 @@ class PDFService:
             Knowledge graph for the chunk
         """
         try:
-            logging.info(f"Processing chunk of size {len(chunk)} characters")
+            logging.info(f"Processing chunk {chunk_index} of size {len(chunk)} characters")
             
             # Generate a mini-summary for this chunk to help with context
             chunk_summary = await PDFService.generate_summary(chunk)
@@ -113,11 +109,11 @@ class PDFService:
             # Generate knowledge graph for this chunk
             knowledge_graph = await kg_builder.create_knowledge_graph(chunk, chunk_summary)
             
-            logging.info(f"Generated knowledge graph for chunk with {len(knowledge_graph.nodes)} nodes and {len(knowledge_graph.relationships)} relationships")
+            logging.info(f"Generated knowledge graph for chunk {chunk_index} with {len(knowledge_graph.nodes)} nodes and {len(knowledge_graph.relationships)} relationships")
             
             return knowledge_graph
         except Exception as e:
-            logging.error(f"Error processing chunk: {str(e)}")
+            logging.error(f"Error processing chunk {chunk_index}: {str(e)}")
             return KnowledgeGraph(nodes=[], relationships=[])
     
     @staticmethod
@@ -182,18 +178,22 @@ class PDFService:
             # Generate document ID
             document_id = f"{filename.replace('.pdf', '')}_{uuid.uuid4().hex[:8]}"
             
-            # Chunk the text into 250 token segments
-            chunks = chunk_text(text, chunk_size=250, overlap=50)
-            logging.info(f"Split document into {len(chunks)} chunks of approximately 250 tokens each")
+            # Chunk the text
+            chunks = chunk_text(text, chunk_size=DEFAULT_CHUNK_SIZE, overlap=DEFAULT_CHUNK_OVERLAP)
+            logging.info(f"Split document into {len(chunks)} chunks of approximately {DEFAULT_CHUNK_SIZE} tokens each")
             
             # Create knowledge graph builder
             kg_builder = CustomKGBuilder()
             
             # Process chunks concurrently with a processor function
+            # Create a list of (chunk_index, chunk) tuples
+            indexed_chunks = [(i, chunk) for i, chunk in enumerate(chunks)]
+            
+            # Process chunks concurrently with a processor function that includes the chunk index
             chunk_graphs = await process_chunks_concurrently(
-                chunks=chunks,
-                processor_func=lambda chunk: PDFService.process_chunk(chunk, kg_builder),
-                max_concurrency=5  # Limit concurrency to avoid overwhelming the system
+                chunks=indexed_chunks,
+                processor_func=lambda idx_chunk: PDFService.process_chunk(idx_chunk[0], idx_chunk[1], kg_builder),
+                max_concurrency=DEFAULT_MAX_CONCURRENCY  # Limit concurrency to avoid overwhelming the system
             )
             
             # Merge the knowledge graphs from all chunks
@@ -205,9 +205,9 @@ class PDFService:
             knowledge_graph = await merge_similar_entities(knowledge_graph)
             logging.info(f"After entity merging, knowledge graph has {len(knowledge_graph.nodes)} nodes and {len(knowledge_graph.relationships)} relationships")
             
-            # Store in Neo4j
+            # Store in Neo4j with chunks
             neo4j_service = Neo4jService()
-            db_result = neo4j_service.commit_knowledge_graph(knowledge_graph, document_id)
+            db_result = neo4j_service.commit_knowledge_graph_with_chunks(knowledge_graph, document_id, chunks)
             neo4j_service.close()
             
             # Format response
@@ -257,7 +257,7 @@ class PDFService:
             "filename": filename,
             "page_count": page_count,
             "message": "PDF processed successfully",
-            "text_preview": text[:200] + "..." if len(text) > 200 else text
+            "text_preview": text[:DEFAULT_TEXT_PREVIEW_LENGTH] + "..." if len(text) > DEFAULT_TEXT_PREVIEW_LENGTH else text
         }
         
         if summary:

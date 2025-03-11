@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
 from routes.pdf_routes import router as pdf_router
+from routes.chat_routes import router as chat_router
 
 # Configure logging
 logging.basicConfig(
@@ -38,6 +39,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(pdf_router)
+app.include_router(chat_router)
 
 @app.get("/")
 async def root():
@@ -54,7 +56,9 @@ async def root():
             "Process with KG": "/pdf/process-with-kg/",
             "Get Graph": "/pdf/graph/{document_id}",
             "Similarity Search": "/pdf/search/{document_id}?query={query}&top_k={top_k}",
-            "Update Embeddings": "/pdf/update-embeddings/{document_id}"
+            "Update Embeddings": "/pdf/update-embeddings/{document_id}",
+            "Chat": "/chat/{document_id}?query={query}&top_k={top_k}",
+            "Get All Documents": "/pdf/documents"
         }
     }
 
