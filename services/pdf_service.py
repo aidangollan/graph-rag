@@ -112,7 +112,8 @@ class PDFService:
             document_id = f"{filename.replace('.pdf', '')}_{uuid.uuid4().hex[:8]}"
             
             # Generate knowledge graph
-            knowledge_graph = CustomKGBuilder.create_knowledge_graph(text, summary)
+            kg_builder = CustomKGBuilder()
+            knowledge_graph = kg_builder.create_knowledge_graph(text, summary)
             
             # Store in Neo4j
             neo4j_service = Neo4jService()

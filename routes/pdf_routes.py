@@ -1,6 +1,8 @@
-from fastapi import APIRouter, File, UploadFile, HTTPException
+from fastapi import APIRouter, File, UploadFile, HTTPException, Query
 from fastapi.responses import JSONResponse
 from services.pdf_service import PDFService
+from services.embedding_service import EmbeddingService
+from typing import Optional
 
 # Create router for PDF-related endpoints
 router = APIRouter(
@@ -115,3 +117,77 @@ async def get_knowledge_graph(document_id: str):
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error retrieving knowledge graph: {str(e)}")
+
+@router.get("/search/{document_id}")
+async def similarity_search(
+    document_id: str, 
+    query: str, 
+    top_k: Optional[int] = Query(5, description="Number of top results to return")
+):
+    """
+    Perform a similarity search on nodes in a document using embeddings.
+    
+    Args:
+        document_id: Unique identifier for the document to search within
+        query: The search query text
+        top_k: The number of top results to return (default: 5)
+        
+    Returns:
+        JSONResponse with the search results including similarity scores
+        
+    Raises:
+        HTTPException: If there's an error performing the search
+    """
+    try:
+        # Initialize embedding service
+        embedding_service = EmbeddingService()
+        
+        # Perform similarity search
+        search_results = embedding_service.similarity_search(query, document_id, top_k)
+        
+        if not search_results:
+            return JSONResponse(content={
+                "document_id": document_id,
+                "query": query,
+                "results": [],
+                "message": "No results found or error occurred during search"
+            })
+        
+        return JSONResponse(content={
+            "document_id": document_id,
+            "query": query,
+            "results": search_results,
+            "count": len(search_results)
+        })
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error performing similarity search: {str(e)}")
+
+@router.post("/update-embeddings/{document_id}")
+async def update_node_embeddings(document_id: str):
+    """
+    Update embeddings for all nodes in a document.
+    
+    Args:
+        document_id: Unique identifier for the document to update embeddings for
+        
+    Returns:
+        JSONResponse with information about the update
+        
+    Raises:
+        HTTPException: If there's an error updating the embeddings
+    """
+    try:
+        # Initialize embedding service
+        embedding_service = EmbeddingService()
+        
+        # Update embeddings
+        result = embedding_service.update_node_embeddings(document_id)
+        
+        if result.get("status") == "error":
+            raise HTTPException(status_code=500, detail=f"Error updating embeddings: {result.get('error')}")
+        
+        return JSONResponse(content=result)
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating embeddings: {str(e)}")

@@ -77,9 +77,15 @@ class Neo4jService:
                 successful_nodes = []
                 for node in knowledge_graph.nodes:
                     try:
+                        # Check if the node has an embedding score
+                        if not hasattr(node, 'embedding_score') or node.embedding_score is None:
+                            # Set a default embedding score of 0.0 if none exists
+                            node.embedding_score = 0.0
+                            logging.info(f"Setting default embedding score for node: {node.id}")
+                        
                         session.execute_write(self._create_concept_node, node, document_id)
                         successful_nodes.append(node.id)
-                        logging.info(f"Successfully created node: {node.id}")
+                        logging.info(f"Successfully created node: {node.id} with embedding score: {node.embedding_score}")
                     except Exception as e:
                         logging.error(f"Error creating node {node.id}: {str(e)}")
                 
@@ -148,15 +154,26 @@ class Neo4jService:
             "MERGE (c:Concept {id: $node_id}) "
             "ON CREATE SET c.description = $description "
             "ON MATCH SET c.description = $description "
-            "RETURN c"
         )
         
+        # Add embedding score if available
+        if node.embedding_score is not None:
+            create_node_query += "SET c.embedding_score = $embedding_score "
+            
+        create_node_query += "RETURN c"
+        
+        # Prepare parameters
+        params = {
+            "node_id": node.id,
+            "description": node.description
+        }
+        
+        # Add embedding score to parameters if available
+        if node.embedding_score is not None:
+            params["embedding_score"] = node.embedding_score
+        
         # Execute the query with proper parameters
-        result = tx.run(
-            create_node_query, 
-            node_id=node.id, 
-            description=node.description
-        )
+        result = tx.run(create_node_query, **params)
         
         # Consume the result to ensure the query is executed
         summary = result.consume()
@@ -301,10 +318,10 @@ class Neo4jService:
         """
         query = (
             "MATCH (c:Concept)-[:APPEARS_IN]->(d:Document {id: $document_id}) "
-            "RETURN c.id as id, c.description as description"
+            "RETURN c.id as id, c.description as description, c.embedding_score as embedding_score"
         )
         result = tx.run(query, document_id=document_id)
-        return [{"id": record["id"], "description": record["description"]} for record in result]
+        return [{"id": record["id"], "description": record["description"], "embedding_score": record["embedding_score"]} for record in result]
     
     @staticmethod
     def _get_document_relationships(tx, document_id: str) -> List[Dict[str, Any]]:

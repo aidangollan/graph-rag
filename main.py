@@ -25,7 +25,9 @@ async def root():
         "endpoints": [
             "/pdf/upload/",
             "/pdf/process-with-kg/",
-            "/pdf/graph/{document_id}"
+            "/pdf/graph/{document_id}",
+            "/pdf/search/{document_id}?query={query}&top_k={top_k}",
+            "/pdf/update-embeddings/{document_id}"
         ]
     }
 

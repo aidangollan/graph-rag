@@ -1,11 +1,12 @@
 import json
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from langchain_core.pydantic_v1 import BaseModel, Field, validator
 
 class Node(BaseModel):
     id: str = Field(description="Name or human-readable unique identifier. Must be all lowercase with spaces between words.")
     description: str = Field(description="Description of the node as would be read on a flashcard.")
+    embedding_score: Optional[float] = Field(default=None, description="Similarity score for embedding-based searches.")
 
 class Relationship(BaseModel):
     source: str = Field(description="Name or human-readable unique identifier of source node, must match a node in the nodes list. Must be all lowercase with spaces between words.")
@@ -66,7 +67,8 @@ class KnowledgeGraph(BaseModel):
                                     if 'id' in node_data and 'description' in node_data:
                                         node = Node(
                                             id=node_data['id'],
-                                            description=node_data['description']
+                                            description=node_data['description'],
+                                            embedding_score=node_data.get('embedding_score')
                                         )
                                         knowledge_graph.nodes.append(node)
                             
@@ -107,7 +109,8 @@ class KnowledgeGraph(BaseModel):
                                 for node_data in arguments['nodes']:
                                     node = Node(
                                         id=node_data['id'],
-                                        description=node_data['description']
+                                        description=node_data['description'],
+                                        embedding_score=node_data.get('embedding_score')
                                     )
                                     knowledge_graph.nodes.append(node)
                             
@@ -136,7 +139,8 @@ class KnowledgeGraph(BaseModel):
                         for node_data in args['nodes']:
                             node = Node(
                                 id=node_data['id'],
-                                description=node_data['description']
+                                description=node_data['description'],
+                                embedding_score=node_data.get('embedding_score')
                             )
                             knowledge_graph.nodes.append(node)
                     
