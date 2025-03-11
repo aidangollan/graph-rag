@@ -43,7 +43,10 @@ async def upload_pdf(file: UploadFile = File(...)):
         # Format the response using the service
         response_data = PDFService.format_response(file.filename, text, page_count)
         
-        return JSONResponse(content=response_data)
+        # Process PDF with knowledge graph
+        kg_response_data = await PDFService.process_pdf_with_knowledge_graph(contents, file.filename)
+        
+        return JSONResponse(content={**response_data, **kg_response_data})
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
@@ -75,7 +78,7 @@ async def process_pdf_with_knowledge_graph(file: UploadFile = File(...)):
         contents = await file.read()
         
         # Process the PDF with knowledge graph generation and Neo4j storage
-        response_data = PDFService.process_pdf_with_knowledge_graph(contents, file.filename)
+        response_data = await PDFService.process_pdf_with_knowledge_graph(contents, file.filename)
         
         return JSONResponse(content=response_data)
     
@@ -182,7 +185,7 @@ async def update_node_embeddings(document_id: str):
         embedding_service = EmbeddingService()
         
         # Update embeddings
-        result = embedding_service.update_node_embeddings(document_id)
+        result = await embedding_service.update_node_embeddings(document_id)
         
         if result.get("status") == "error":
             raise HTTPException(status_code=500, detail=f"Error updating embeddings: {result.get('error')}")

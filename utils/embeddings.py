@@ -6,6 +6,9 @@ import os
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 import numpy as np
+import asyncio
+import concurrent.futures
+from functools import partial
 
 # Import embedding models
 from langchain_openai import OpenAIEmbeddings
@@ -55,6 +58,35 @@ def generate_embedding(text: str) -> List[float]:
     except Exception as e:
         logging.error(f"Error generating embedding: {str(e)}")
         return []
+
+async def generate_embeddings_concurrently(texts: List[str], max_workers: int = 100) -> List[List[float]]:
+    """
+    Generate embeddings for multiple texts concurrently.
+    
+    Args:
+        texts: List of texts to generate embeddings for
+        max_workers: Maximum number of concurrent workers
+        
+    Returns:
+        List of embedding vectors
+    """
+    try:
+        # Use ThreadPoolExecutor to run embedding generation concurrently
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Create a partial function that we can use with the executor
+            loop = asyncio.get_event_loop()
+            
+            # Submit all tasks to the executor
+            futures = [loop.run_in_executor(executor, generate_embedding, text) for text in texts]
+            
+            # Wait for all futures to complete
+            embeddings = await asyncio.gather(*futures)
+            
+            return embeddings
+    except Exception as e:
+        logging.error(f"Error generating embeddings concurrently: {str(e)}")
+        # Return empty embeddings for each text
+        return [[] for _ in range(len(texts))]
 
 def calculate_similarity(embedding1: List[float], embedding2: List[float]) -> float:
     """

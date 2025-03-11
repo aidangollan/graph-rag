@@ -4,6 +4,7 @@ from typing import Dict, Any, List
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
 from objects.knowledge_graph import KnowledgeGraph, Node, Relationship
+import numpy as np
 
 # Load environment variables
 load_dotenv()
@@ -140,63 +141,43 @@ class Neo4jService:
         logging.info(f"Document node created: {summary.counters}")
     
     @staticmethod
-    def _create_concept_node(tx, node: Node, document_id: str):
+    def _create_concept_node(tx, node: Node, document_id: str) -> None:
         """
-        Create a concept node in the Neo4j database and link it to the document.
+        Create a concept node in Neo4j.
         
         Args:
             tx: Neo4j transaction
-            node: The node to create
-            document_id: Unique identifier for the document
+            node: Node to create
+            document_id: Document ID to link the node to
         """
-        # Create the concept node with a more explicit query
-        create_node_query = (
-            "MERGE (c:Concept {id: $node_id}) "
-            "ON CREATE SET c.description = $description "
-            "ON MATCH SET c.description = $description "
-        )
+        # Convert embedding_score to a string if it's a list or array
+        embedding_score = node.embedding_score
+        if isinstance(embedding_score, (list, np.ndarray)):
+            # Convert numpy array to list if needed
+            if hasattr(embedding_score, 'tolist'):
+                embedding_score = embedding_score.tolist()
+                
+            # Serialize the embedding vector to a string for storage
+            embedding_score = str(embedding_score)
         
-        # Add embedding score if available
-        if node.embedding_score is not None:
-            create_node_query += "SET c.embedding_score = $embedding_score "
-            
-        create_node_query += "RETURN c"
+        # Create the node
+        query = """
+        MERGE (c:Concept {id: $id})
+        SET c.description = $description,
+            c.embedding_score = $embedding_score
+        WITH c
         
-        # Prepare parameters
-        params = {
-            "node_id": node.id,
-            "description": node.description
-        }
+        MATCH (d:Document {id: $document_id})
+        MERGE (c)-[:BELONGS_TO]->(d)
+        """
         
-        # Add embedding score to parameters if available
-        if node.embedding_score is not None:
-            params["embedding_score"] = node.embedding_score
-        
-        # Execute the query with proper parameters
-        result = tx.run(create_node_query, **params)
-        
-        # Consume the result to ensure the query is executed
-        summary = result.consume()
-        logging.info(f"Concept node created or updated: {summary.counters}")
-        
-        # Create the relationship to the document
-        create_rel_query = (
-            "MATCH (c:Concept {id: $node_id}) "
-            "MATCH (d:Document {id: $document_id}) "
-            "MERGE (c)-[r:APPEARS_IN]->(d) "
-            "RETURN r"
-        )
-        
-        # Execute the query with proper parameters
-        result = tx.run(
-            create_rel_query, 
-            node_id=node.id, 
+        tx.run(
+            query,
+            id=node.id,
+            description=node.description,
+            embedding_score=embedding_score,
             document_id=document_id
         )
-        
-        # Consume the result to ensure the query is executed
-        summary = result.consume()
-        logging.info(f"Relationship to document created: {summary.counters}")
     
     @staticmethod
     def _create_relationship(tx, relationship: Relationship, document_id: str):
@@ -307,21 +288,40 @@ class Neo4jService:
     @staticmethod
     def _get_document_nodes(tx, document_id: str) -> List[Dict[str, Any]]:
         """
-        Get all nodes associated with a document.
+        Get all nodes for a document.
         
         Args:
             tx: Neo4j transaction
-            document_id: Unique identifier for the document
+            document_id: Document ID
             
         Returns:
             List of nodes with their properties
         """
         query = (
-            "MATCH (c:Concept)-[:APPEARS_IN]->(d:Document {id: $document_id}) "
+            "MATCH (c:Concept)-[:BELONGS_TO]->(d:Document {id: $document_id}) "
             "RETURN c.id as id, c.description as description, c.embedding_score as embedding_score"
         )
         result = tx.run(query, document_id=document_id)
-        return [{"id": record["id"], "description": record["description"], "embedding_score": record["embedding_score"]} for record in result]
+        
+        nodes = []
+        for record in result:
+            # Get embedding score and try to parse it if it's a string representation of a list
+            embedding_score = record.get("embedding_score")
+            if embedding_score and isinstance(embedding_score, str) and embedding_score.startswith('[') and embedding_score.endswith(']'):
+                try:
+                    # Convert string representation of list back to actual list
+                    import ast
+                    embedding_score = ast.literal_eval(embedding_score)
+                except (ValueError, SyntaxError) as e:
+                    logging.warning(f"Failed to parse embedding score: {str(e)}")
+            
+            nodes.append({
+                "id": record.get("id"),
+                "description": record.get("description"),
+                "embedding_score": embedding_score
+            })
+        
+        return nodes
     
     @staticmethod
     def _get_document_relationships(tx, document_id: str) -> List[Dict[str, Any]]:

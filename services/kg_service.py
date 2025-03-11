@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from langchain_core.prompts import ChatPromptTemplate
 
 from utils.llm import get_llm
@@ -9,7 +10,7 @@ from services.embedding_service import EmbeddingService
 def escape_template_variables(s):
     return s.replace("{", "{{").replace("}", "}}")
 
-def setup_llm(text: str, summary: str):
+async def setup_llm(text: str, summary: str):
     system_prompt = """
         - You are a top-tier algorithm designed for extracting information in structured formats to build a concise and meaningful knowledge graph.
         - Your task is to identify the most important concepts and entities in the text and the relations between them.
@@ -64,7 +65,7 @@ class CustomKGBuilder:
         """
         self.embedding_service = EmbeddingService()
     
-    def create_knowledge_graph(self, text: str, summary: str) -> KnowledgeGraph:
+    async def create_knowledge_graph(self, text: str, summary: str) -> KnowledgeGraph:
         """
         Create a knowledge graph from text and summary, with embeddings for nodes.
         
@@ -84,10 +85,10 @@ class CustomKGBuilder:
             logging.info(f"Cleaned text: {cleaned_text[:100]}...")
             logging.info(f"Cleaned summary: {cleaned_summary[:100]}...")
             
-            llm_chain = setup_llm(text=cleaned_text, summary=cleaned_summary)
+            llm_chain = await setup_llm(text=cleaned_text, summary=cleaned_summary)
 
             try:
-                result = llm_chain.invoke({})
+                result = await llm_chain.ainvoke({})
                 logging.info(f"LLM output received")
                 
                 # Parse the LLM output to get a knowledge graph
@@ -97,7 +98,7 @@ class CustomKGBuilder:
                 # Generate embeddings for all nodes in the knowledge graph
                 if len(knowledge_graph.nodes) > 0:
                     logging.info(f"Generating embeddings for {len(knowledge_graph.nodes)} nodes")
-                    knowledge_graph = self.embedding_service.generate_embeddings_for_graph(knowledge_graph)
+                    knowledge_graph = await self.embedding_service.generate_embeddings_for_graph(knowledge_graph)
                     logging.info(f"Generated embeddings for knowledge graph")
                 else:
                     logging.warning("No nodes found in knowledge graph, skipping embedding generation")

@@ -2,13 +2,16 @@ import PyPDF2
 import io
 import uuid
 import logging
-from typing import Tuple, Dict, Any
+import asyncio
+from typing import Tuple, Dict, Any, List
 
 from services.kg_service import CustomKGBuilder
 from services.neo4j_service import Neo4jService
 from utils.llm import get_llm
 from utils.constants import GPT_4O_MINI
+from utils.text_chunking import chunk_text, process_chunks_concurrently
 from langchain_core.prompts import ChatPromptTemplate
+from objects.knowledge_graph import KnowledgeGraph, Node, Relationship
 
 class PDFService:
     """
@@ -46,7 +49,7 @@ class PDFService:
         return text, num_pages
     
     @staticmethod
-    def generate_summary(text: str) -> str:
+    async def generate_summary(text: str) -> str:
         """
         Generate a summary of the PDF text using LLM.
         
@@ -81,7 +84,7 @@ class PDFService:
             
             # Generate summary
             chain = summary_prompt | summary_llm
-            summary = chain.invoke({"text": text})
+            summary = await chain.ainvoke({"text": text})
             
             return summary.content
         except Exception as e:
@@ -90,9 +93,77 @@ class PDFService:
             return text[:500] + "..." if len(text) > 500 else text
     
     @staticmethod
-    def process_pdf_with_knowledge_graph(pdf_content: bytes, filename: str) -> Dict[str, Any]:
+    async def process_chunk(chunk: str, kg_builder: CustomKGBuilder) -> KnowledgeGraph:
+        """
+        Process a single text chunk to generate a knowledge graph.
+        
+        Args:
+            chunk: Text chunk to process
+            kg_builder: Knowledge graph builder instance
+            
+        Returns:
+            Knowledge graph for the chunk
+        """
+        try:
+            logging.info(f"Processing chunk of size {len(chunk)} characters")
+            
+            # Generate a mini-summary for this chunk to help with context
+            chunk_summary = await PDFService.generate_summary(chunk)
+            
+            # Generate knowledge graph for this chunk
+            knowledge_graph = await kg_builder.create_knowledge_graph(chunk, chunk_summary)
+            
+            logging.info(f"Generated knowledge graph for chunk with {len(knowledge_graph.nodes)} nodes and {len(knowledge_graph.relationships)} relationships")
+            
+            return knowledge_graph
+        except Exception as e:
+            logging.error(f"Error processing chunk: {str(e)}")
+            return KnowledgeGraph(nodes=[], relationships=[])
+    
+    @staticmethod
+    def merge_knowledge_graphs(graphs: List[KnowledgeGraph]) -> KnowledgeGraph:
+        """
+        Merge multiple knowledge graphs into a single graph.
+        
+        Args:
+            graphs: List of knowledge graphs to merge
+            
+        Returns:
+            Merged knowledge graph
+        """
+        merged_nodes = {}
+        merged_relationships = set()
+        
+        # Merge nodes (use node ID as key to avoid duplicates)
+        for graph in graphs:
+            for node in graph.nodes:
+                if node.id in merged_nodes:
+                    # If node already exists, use the longer description
+                    if len(node.description) > len(merged_nodes[node.id].description):
+                        merged_nodes[node.id] = node
+                else:
+                    merged_nodes[node.id] = node
+        
+        # Merge relationships (use tuple of source, target, type as key to avoid duplicates)
+        for graph in graphs:
+            for rel in graph.relationships:
+                rel_key = (rel.source, rel.target, rel.type)
+                merged_relationships.add(rel_key)
+        
+        # Convert back to lists
+        nodes_list = list(merged_nodes.values())
+        relationships_list = [
+            Relationship(source=src, target=tgt, type=rel_type)
+            for src, tgt, rel_type in merged_relationships
+        ]
+        
+        return KnowledgeGraph(nodes=nodes_list, relationships=relationships_list)
+    
+    @staticmethod
+    async def process_pdf_with_knowledge_graph(pdf_content: bytes, filename: str) -> Dict[str, Any]:
         """
         Process a PDF document, extract text, generate knowledge graph, and store in Neo4j.
+        Uses chunking and concurrent processing for improved performance.
         
         Args:
             pdf_content: Raw bytes of the PDF file
@@ -105,15 +176,34 @@ class PDFService:
             # Extract text from PDF
             text, page_count = PDFService.extract_text_from_pdf(pdf_content)
             
-            # Generate summary
-            summary = PDFService.generate_summary(text)
+            # Generate overall summary
+            summary = await PDFService.generate_summary(text)
             
             # Generate document ID
             document_id = f"{filename.replace('.pdf', '')}_{uuid.uuid4().hex[:8]}"
             
-            # Generate knowledge graph
+            # Chunk the text into 250 token segments
+            chunks = chunk_text(text, chunk_size=250, overlap=50)
+            logging.info(f"Split document into {len(chunks)} chunks of approximately 250 tokens each")
+            
+            # Create knowledge graph builder
             kg_builder = CustomKGBuilder()
-            knowledge_graph = kg_builder.create_knowledge_graph(text, summary)
+            
+            # Process chunks concurrently with a processor function
+            chunk_graphs = await process_chunks_concurrently(
+                chunks=chunks,
+                processor_func=lambda chunk: PDFService.process_chunk(chunk, kg_builder),
+                max_concurrency=5  # Limit concurrency to avoid overwhelming the system
+            )
+            
+            # Merge the knowledge graphs from all chunks
+            knowledge_graph = PDFService.merge_knowledge_graphs(chunk_graphs)
+            logging.info(f"Merged knowledge graph has {len(knowledge_graph.nodes)} nodes and {len(knowledge_graph.relationships)} relationships")
+            
+            # Merge similar entities across chunks
+            from utils.entity_merging import merge_similar_entities
+            knowledge_graph = await merge_similar_entities(knowledge_graph)
+            logging.info(f"After entity merging, knowledge graph has {len(knowledge_graph.nodes)} nodes and {len(knowledge_graph.relationships)} relationships")
             
             # Store in Neo4j
             neo4j_service = Neo4jService()
@@ -128,7 +218,8 @@ class PDFService:
                 summary=summary,
                 knowledge_graph=knowledge_graph,
                 document_id=document_id,
-                db_result=db_result
+                db_result=db_result,
+                chunks_count=len(chunks)
             )
             
             return response
@@ -144,7 +235,8 @@ class PDFService:
     @staticmethod
     def format_response(filename: str, text: str, page_count: int, 
                         summary: str = None, knowledge_graph = None, 
-                        document_id: str = None, db_result: Dict[str, Any] = None) -> Dict[str, Any]:
+                        document_id: str = None, db_result: Dict[str, Any] = None,
+                        chunks_count: int = None) -> Dict[str, Any]:
         """
         Format the response for the API.
         
@@ -156,6 +248,7 @@ class PDFService:
             knowledge_graph: Generated knowledge graph
             document_id: Document ID in the Neo4j database
             db_result: Result of database operation
+            chunks_count: Number of chunks the document was split into
             
         Returns:
             Dictionary with the formatted response
@@ -181,5 +274,8 @@ class PDFService:
             
         if db_result:
             response["database_result"] = db_result
+            
+        if chunks_count is not None:
+            response["chunks_processed"] = chunks_count
             
         return response
